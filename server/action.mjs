@@ -1,0 +1,186 @@
+import { db } from './database.mjs';
+const validIndustries = ['carton', 'food'];
+const str = (x, max = 200) => { if (typeof x !== 'string' || !x.trim() || x.length > max)
+    throw new Error('Majburiy maydonni to‘g‘ri to‘ldiring'); return x.trim(); };
+const num = (x, zero = false) => { const n = Number(x); if (x === '' || x == null || !Number.isFinite(n) || n < (zero ? 0 : 0.000001) || n > 1e12)
+    throw new Error('Miqdor va narxlarni to‘g‘ri kiriting'); return n; };
+const date = (x) => { const s = str(x); if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || Number.isNaN(Date.parse(s)))
+    throw new Error('Sanani tekshiring'); return s; };
+export async function POST(request) {
+    try {
+        if (!request.headers.get('oai-authenticated-user-id'))
+            return Response.json({ error: 'Hisobingizga kiring' }, { status: 401 });
+        const origin = request.headers.get('origin');
+        if (origin && origin !== new URL(request.url).origin)
+            return Response.json({ error: 'Ruxsat yo‘q' }, { status: 403 });
+        const b = await request.json();
+        const industry = str(b.industry);
+        if (!validIndustries.includes(industry))
+            throw new Error('Sohani tanlang');
+        const d = db(), now = new Date().toISOString(), id = crypto.randomUUID();
+        const statements = [];
+        const q = (s, ...args) => d.prepare(s).bind(...args);
+        const get = async (t, key) => { const r = await q(`SELECT * FROM ${t} WHERE id=? AND industry=?`, str(key), industry).first(); if (!r)
+            throw new Error('Ma’lumot topilmadi'); return r; };
+        let description = '', opid = id;
+        switch (b.action) {
+            case 'material': {
+                const units = ['kg', 'litr', 'metr', 'm²', 'dona'];
+                if (!units.includes(b.unit))
+                    throw new Error('O‘lchov birligini tanlang');
+                statements.push(q('INSERT INTO materials(id,industry,name,unit,qty,price,minimum) VALUES(?,?,?,?,?,?,?)', id, industry, str(b.name), b.unit, num(b.qty, true), num(b.price, true), num(b.minimum, true)));
+                description = 'Xomashyo qo‘shildi: ' + b.name;
+                break;
+            }
+            case 'receipt': {
+                const m = await get('materials', b.material), qty = num(b.qty), price = num(b.price, true);
+                statements.push(q('UPDATE materials SET price=(qty*price+?*?)/(qty+?), qty=qty+? WHERE id=? AND industry=?', qty, price, qty, qty, m.id, industry));
+                description = m.name + ' kirimi: ' + qty + ' ' + m.unit;
+                break;
+            }
+            case 'product': {
+                const recipe = b.recipe;
+                if (!Array.isArray(recipe) || !recipe.length || recipe.length > 30)
+                    throw new Error('Kamida bitta xomashyo me’yorini qo‘shing');
+                const seen = new Set();
+                for (const r of recipe) {
+                    await get('materials', r.material);
+                    r.qty = num(r.qty);
+                    if (seen.has(r.material))
+                        throw new Error('Xomashyo takrorlangan');
+                    seen.add(r.material);
+                }
+                const stages = str(b.stages, 500).split(',').map((s) => s.trim()).filter(Boolean);
+                if (!stages.length || stages.length > 12)
+                    throw new Error('Bosqichlarni kiriting');
+                if (!['kg', 'litr', 'metr', 'm²', 'dona'].includes(b.unit))
+                    throw new Error('Birlik noto‘g‘ri');
+                statements.push(q('INSERT INTO products(id,industry,name,unit,recipe,stages) VALUES(?,?,?,?,?,?)', id, industry, str(b.name), b.unit, JSON.stringify(recipe), JSON.stringify(stages)));
+                description = 'Mahsulot qo‘shildi: ' + b.name;
+                break;
+            }
+            case 'batch': {
+                const p = await get('products', b.product);
+                const due = date(b.due);
+                const expiry = b.expiry ? date(b.expiry) : '';
+                if (expiry && expiry < due)
+                    throw new Error('Yaroqlilik muddati reja sanasidan oldin bo‘lmasin');
+                statements.push(q('INSERT INTO batches(id,industry,product,code,plan,responsible,due,expiry,created) VALUES(?,?,?,?,?,?,?,?,?)', id, industry, p.id, 'P-' + Date.now().toString(36).toUpperCase(), num(b.plan), str(b.responsible), due, expiry, now));
+                description = 'Yangi partiya rejalashtirildi: ' + p.name;
+                break;
+            }
+            case 'start': {
+                const batch = await get('batches', b.batch);
+                if (batch.status !== 'planned')
+                    throw new Error('Partiya allaqachon boshlangan');
+                const p = await get('products', batch.product);
+                const consumption = [];
+                let cost = 0;
+                for (const r of JSON.parse(p.recipe)) {
+                    const m = await get('materials', r.material), qty = r.qty * batch.plan;
+                    if (m.qty + 1e-6 < qty)
+                        throw new Error(m.name + ' yetarli emas. Kerak: ' + qty + ' ' + m.unit);
+                    consumption.push({ material: m.id, name: m.name, unit: m.unit, qty, price: m.price });
+                    cost += qty * m.price;
+                    statements.push(q('UPDATE materials SET qty=qty-? WHERE id=? AND industry=?', qty, m.id, industry));
+                }
+                statements.push(q("UPDATE batches SET status='running',consumption=?,cost=? WHERE id=? AND industry=?", JSON.stringify(consumption), cost, batch.id, industry));
+                opid = batch.id + '-start';
+                description = 'Partiya boshlandi: ' + batch.code;
+                break;
+            }
+            case 'next': {
+                const batch = await get('batches', b.batch);
+                const p = await get('products', batch.product);
+                if (batch.status !== 'running')
+                    throw new Error('Partiya ishlab chiqarishda emas');
+                const stages = JSON.parse(p.stages);
+                const next = batch.stage + 1;
+                statements.push(q('UPDATE batches SET stage=?,status=? WHERE id=? AND industry=?', next >= stages.length ? batch.stage : next, next >= stages.length ? 'quality' : 'running', batch.id, industry));
+                opid = batch.id + '-stage-' + batch.stage;
+                description = batch.code + ': ' + (next >= stages.length ? 'Sifat tekshiruviga yuborildi' : stages[next]);
+                break;
+            }
+            case 'complete': {
+                const batch = await get('batches', b.batch);
+                if (batch.status !== 'quality')
+                    throw new Error('Avval ishlab chiqarish bosqichlarini tugating');
+                const good = num(b.good, true), reject = num(b.reject, true), extra = num(b.extra, true);
+                if (good + reject <= 0)
+                    throw new Error('Yaroqli yoki brak miqdorini kiriting');
+                if (!Array.isArray(b.actual))
+                    throw new Error('Haqiqiy sarfni kiriting');
+                const consumed = JSON.parse(batch.consumption);
+                let cost = extra;
+                const actual = [];
+                for (const r of consumed) {
+                    const a = b.actual.find((v) => v.material === r.material);
+                    if (!a)
+                        throw new Error(r.name + ' sarfini kiriting');
+                    const qty = num(a.qty, true);
+                    statements.push(q('UPDATE materials SET qty=qty+?-? WHERE id=? AND industry=?', r.qty, qty, r.material, industry));
+                    cost += qty * r.price;
+                    actual.push({ ...r, qty });
+                }
+                statements.push(q("UPDATE batches SET good=?,reject=?,remaining=?,cost=?,consumption=?,status='complete',note=? WHERE id=? AND industry=?", good, reject, good, cost, JSON.stringify(actual), String(b.note || '').slice(0, 1000), batch.id, industry));
+                opid = batch.id + '-complete';
+                description = 'Sifat tasdiqlandi: ' + batch.code + ', ' + good + ' tayyor';
+                break;
+            }
+            case 'order': {
+                await get('products', b.product);
+                statements.push(q('INSERT INTO orders(id,industry,customer,product,qty,due,note) VALUES(?,?,?,?,?,?,?)', id, industry, str(b.customer), b.product, num(b.qty), date(b.due), String(b.note || '').slice(0, 1000)));
+                description = 'Buyurtma qabul qilindi: ' + b.customer;
+                break;
+            }
+            case 'order_done': {
+                const o = await get('orders', b.order);
+                if (o.status !== 'open')
+                    throw new Error('Buyurtma yopilgan');
+                statements.push(q("UPDATE orders SET status='done' WHERE id=? AND industry=?", o.id, industry));
+                description = 'Buyurtma topshirildi: ' + o.customer;
+                break;
+            }
+            case 'sale': {
+                const batch = await get('batches', b.batch);
+                if (batch.status !== 'complete')
+                    throw new Error('Mahsulot tayyor emas');
+                const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Tashkent' });
+                if (batch.expiry && batch.expiry < today)
+                    throw new Error('Mahsulot yaroqlilik muddati o‘tgan');
+                const qty = num(b.qty), price = num(b.price, true), paid = num(b.paid, true);
+                if (qty > batch.remaining + 1e-6)
+                    throw new Error('Tayyor mahsulot yetarli emas');
+                if (paid > qty * price)
+                    throw new Error('To‘lov sotuv summasidan oshmasin');
+                statements.push(q('UPDATE batches SET remaining=remaining-? WHERE id=? AND industry=?', qty, batch.id, industry));
+                statements.push(q('INSERT INTO sales(id,industry,batch,customer,qty,price,paid,cost,created) VALUES(?,?,?,?,?,?,?,?,?)', id, industry, batch.id, str(b.customer), qty, price, paid, qty * batch.cost / batch.good, now));
+                description = 'Sotuv: ' + b.customer;
+                break;
+            }
+            case 'payment': {
+                const sale = await get('sales', b.sale);
+                const amount = num(b.amount);
+                statements.push(q('UPDATE sales SET paid=paid+? WHERE id=? AND industry=?', amount, sale.id, industry));
+                if (amount > sale.qty * sale.price - sale.paid + 1e-6)
+                    throw new Error('To‘lov qarzdan katta');
+                description = 'Qarz to‘lovi: ' + sale.customer;
+                break;
+            }
+            case 'expense': {
+                statements.push(q('INSERT INTO expenses(id,industry,name,amount,created) VALUES(?,?,?,?,?)', id, industry, str(b.name), num(b.amount), now));
+                description = 'Umumiy xarajat: ' + b.name;
+                break;
+            }
+            default: throw new Error('Amal topilmadi');
+        }
+        statements.unshift(q('INSERT INTO operations(id,industry,kind,description,created) VALUES(?,?,?,?,?)', opid, industry, b.action, description, now));
+        await d.batch(statements);
+        return Response.json({ ok: true, id });
+    }
+    catch (e) {
+        const message = e instanceof Error ? e.message : 'Xato';
+        console.error(e);
+        return Response.json({ error: /stock_nonnegative|goods_nonnegative/.test(message) ? 'Ombordagi qoldiq yetarli emas. Ma’lumotlarni yangilang.' : /payment_bound/.test(message) ? 'To‘lov qarzdan katta. Ma’lumotlarni yangilang.' : /UNIQUE constraint/.test(message) ? 'Bu amal allaqachon bajarilgan. Ma’lumotlarni yangilang.' : /D1_|SQLITE_|no such table/.test(message) ? 'Saqlab bo‘lmadi. Qayta urinib ko‘ring.' : message }, { status: 400 });
+    }
+}
