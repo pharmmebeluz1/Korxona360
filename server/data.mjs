@@ -3,7 +3,7 @@ export async function GET(request) { try {
     if (!request.headers.get('oai-authenticated-user-id'))
         return Response.json({ error: 'Hisobingizga kiring' }, { status: 401 });
     const industry = new URL(request.url).searchParams.get('industry');
-    if (!['carton', 'food'].includes(industry || ''))
+    if (!["carton", "food", "drinks", "plastic", "metal", "construction", "textile", "chemicals", "paint", "wood", "glass", "rubber", "electrical", "leather", "other"].includes(industry || ''))
         return Response.json({ error: 'Soha noto‘g‘ri' }, { status: 400 });
     const d = db();
     const tables = ['materials', 'products', 'batches', 'orders', 'sales', 'expenses', 'operations'];

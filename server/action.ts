@@ -1,5 +1,5 @@
 import { db } from './database.mjs';
-const validIndustries=['carton','food'];
+const validIndustries=["carton", "food", "drinks", "plastic", "metal", "construction", "textile", "chemicals", "paint", "wood", "glass", "rubber", "electrical", "leather", "other"];
 const str=(x:unknown,max=200)=>{if(typeof x!=='string'||!x.trim()||x.length>max)throw new Error('Majburiy maydonni to‘g‘ri to‘ldiring');return x.trim();};
 const num=(x:unknown,zero=false)=>{const n=Number(x);if(x===''||x==null||!Number.isFinite(n)||n<(zero?0:0.000001)||n>1e12)throw new Error('Miqdor va narxlarni to‘g‘ri kiriting');return n;};
 const date=(x:unknown)=>{const s=str(x);if(!/^\d{4}-\d{2}-\d{2}$/.test(s)||Number.isNaN(Date.parse(s)))throw new Error('Sanani tekshiring');return s;};

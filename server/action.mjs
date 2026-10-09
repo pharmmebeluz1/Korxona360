@@ -1,5 +1,5 @@
 import { db } from './database.mjs';
-const validIndustries = ['carton', 'food'];
+const validIndustries = ["carton", "food", "drinks", "plastic", "metal", "construction", "textile", "chemicals", "paint", "wood", "glass", "rubber", "electrical", "leather", "other"];
 const str = (x, max = 200) => { if (typeof x !== 'string' || !x.trim() || x.length > max)
     throw new Error('Majburiy maydonni to‘g‘ri to‘ldiring'); return x.trim(); };
 const num = (x, zero = false) => { const n = Number(x); if (x === '' || x == null || !Number.isFinite(n) || n < (zero ? 0 : 0.000001) || n > 1e12)
